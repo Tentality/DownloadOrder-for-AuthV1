@@ -1,4 +1,4 @@
-<<?php
+<?php
 
 // 檢查命令列參數數量
 if ($argc != 4) {
@@ -7,75 +7,128 @@ if ($argc != 4) {
 }
 
 $game_id = $argv[1];
-$ver = $argv[2];
+$version = $argv[2];  
 $serial = $argv[3];
 
-// 驗證參數
-$validate = [
-    'game_id' => ['/^[A-Z0-9]{4}$/', "❌ 遊戲ID格式錯誤\n"],
-    'ver' => ['/^\d+(\.\d+)?$/', "❌ 版本格式錯誤\n"],
-    'serial' => ['/^[A-Z0-9]{11}$/', "❌ 序列號格式錯誤\n"]
+// 參數驗證規則
+$validation_rules = [
+    'game_id' => [
+        'regex' => '/^[A-Z0-9]{4}$/',
+        'error' => "❌ 遊戲ID格式錯誤\n"
+    ],
+    'version' => [
+        'regex' => '/^\d+(\.\d+)?$/',
+        'error' => "❌ 版本格式錯誤\n"
+    ],
+    'serial' => [
+        'regex' => '/^[A-Z0-9]{11}$/',
+        'error' => "❌ 序列號格式錯誤\n"
+    ]
 ];
-foreach ($validate as $key => [$regex, $error]) {
-    if (!preg_match($regex, $$key)) exit($error);
+
+// 執行參數驗證
+foreach ($validation_rules as $param => $rule) {
+    if (!preg_match($rule['regex'], $$param)) {
+        exit($rule['error']);
+    }
 }
 
-// 構建請求
-$request_data = "game_id=$game_id&ver=$ver&serial=$serial";
-$compressed_data = base64_encode(gzdeflate($request_data, -1, ZLIB_ENCODING_DEFLATE));
+// 構建請求數據 (改用 http_build_query)
+$request_data = http_build_query([
+    'game_id' => $game_id,
+    'ver' => $version,
+    'serial' => $serial
+]);
+
+// 壓縮數據 (使用 zlib 格式)
+$compressed_data = base64_encode(gzcompress($request_data));
+
+// 配置 HTTP 請求
 $options = [
     'http' => [
-        'header' => "Pragma: DFI\r\nUser-Agent: ALL.Net\r\nContent-Type: application/octet-stream\r\nContent-Length: " . strlen($compressed_data),
+        'header' => implode("\r\n", [
+            'Pragma: DFI',
+            'User-Agent: ALL.Net',
+            'Content-Type: application/octet-stream',
+            'Content-Length: ' . strlen($compressed_data)
+        ]),
         'method' => 'POST',
-        'content' => $compressed_data
+        'content' => $compressed_data,
+        'ignore_errors' => true  
     ]
 ];
 
 try {
-    $result = file_get_contents('http://naominet.jp/sys/servlet/DownloadOrder', false, stream_context_create($options));
-    if ($result === false) throw new Exception("❌ 請求失敗");
+    $context = stream_context_create($options);
+    $result = @file_get_contents('http://naominet.jp/sys/servlet/DownloadOrder', false, $context);
+    
+    // 檢查 HTTP 狀態碼
+    if (!str_contains($http_response_header[0], '200')) {
+        $status_line = $http_response_header[0] ?? 'Unknown HTTP Error';
+        throw new Exception("HTTP 錯誤: " . explode(' ', $status_line, 3)[1]);
+    }
 
-    $decoded = gzuncompress(base64_decode($result));
-    if ($decoded === false) throw new Exception("❌ 解壓失敗");
+    if ($result === false) {
+        throw new Exception("❌ 請求失敗");
+    }
 
-    parseResponse($decoded, $game_id, $ver, $serial);
+    // Base64 解碼驗證
+    $decoded_result = base64_decode($result, true);
+    if ($decoded_result === false) {
+        throw new Exception("❌ Base64 解碼失敗");
+    }
+
+    // 解壓縮數據
+    $decoded_data = gzuncompress($decoded_result);
+    if ($decoded_data === false) {
+        throw new Exception("❌ 解壓失敗");
+    }
+
+    parse_response($decoded_data, $game_id, $version, $serial);
 
 } catch (Exception $e) {
     echo "\n🔴 錯誤: " . $e->getMessage() . "\n";
     exit(1);
 }
 
-function parseResponse($response, $game_id, $ver, $serial) {
+/**
+ * 解析伺服器響應
+ */
+function parse_response($response, $game_id, $version, $serial) {
     parse_str($response, $parsed);
 
-    // 請求參數
-    echo "======================================\n";
-    echo "請求參數⬇️: \n";
-    echo "遊戲ID=$game_id, 版本=$ver, 序列號=$serial\n";
-    echo "======================================\n";
+    // 自定義分隔線
+    $divider = "▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅";
+    
+    // 輸出請求參數
+    echo "$divider\n【請求參數】\n";
+    echo str_pad("遊戲ID", 8, ' ') . ": $game_id\n";
+    echo str_pad("版本", 8, ' ') . ": $version\n";
+    echo str_pad("序列號", 8, ' ') . ": $serial\n$divider\n\n";
 
-    // 狀態碼
-    $status = isset($parsed['stat']) && $parsed['stat'] == 1 ? "請求成功✅" : "請求失敗❌";
-    echo "狀態回報: $status\n";
+    // 狀態顯示
+    $status_icon = $parsed['stat'] == 1 ? "✔" : "✘";
+    echo "$status_icon 狀態 : " . ($parsed['stat'] == 1 ? "請求成功" : "請求失敗") . " (代碼 {$parsed['stat']})\n\n";
 
     // 關聯序列號
     if (!empty($parsed['serial'])) {
-        $serials = implode(', ', explode(',', $parsed['serial']));
-        echo " 關聯序列號:\n";
-        echo "      ➤ $serials\n";
+        echo "【關聯序列號】\n";
+        foreach (explode(',', $parsed['serial']) as $s) {
+            echo "‣ $s\n";
+        }
+        echo "\n";
     }
 
     // 下載連結
-    if (!empty($parsed['uri'])) {
-        $uris = array_filter(explode('|', $parsed['uri']));
-        echo "======================================\n";
-        echo " 下載連結:\n";
+    $uris = !empty($parsed['uri']) ? array_values(array_filter(explode('|', $parsed['uri']))) : [];
+    echo "【下載資源】\n";
+    if (!empty($uris)) {
         foreach ($uris as $i => $uri) {
-            echo "      ➤ " . ($i + 1) . ". $uri\n";
+            $number = $i + 1; 
+            echo "▸ {$number}. $uri\n"; 
         }
     } else {
-        echo "======================================\n";
-        echo " 下載連結:\n      ➤ 暫無可用連結\n";
+        echo "⓪ 暫無可用連結\n";
     }
-    echo "======================================\n";
+    echo $divider . "\n";
 }
